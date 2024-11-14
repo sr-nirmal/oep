@@ -3,6 +3,7 @@ import threading
 import random
 from cvzone.HandTrackingModule import HandDetector
 from loop_detect.detect import VideoLoopFinder
+from matplotlib.animation import FuncAnimation
 import time
 import streamlit as st
 import numpy as np
@@ -92,7 +93,7 @@ class OEP():  # Inherit from VideoLoopFinder
         self.current_lip = 0
         self.prev_lip = 0
 
-        #streamlit 
+        # streamlit 
         # st.set_page_config(page_title="Streamlit WebCam App")
         # st.title("Webcam Display Steamlit App")
         # self.frame_placeholder = st.empty()
@@ -115,9 +116,15 @@ class OEP():  # Inherit from VideoLoopFinder
         self.time = 0
         self.audio_xs = []
         self.audio_ys = []
+        self.threshold = []
         self.MAX_POINTS = 100
-        self.fig = plt.figure()
-        self.ax1 = self.fig.add_subplot(1,1,1)
+
+        self.fig, self.ax = plt.subplots()
+        self.ax.set_title("Real-Time Audio Volume Plot")
+        self.ax.set_xlabel("Time (s)")
+        self.ax.set_ylabel("Volume")
+        self.line, = self.ax.plot([], [], lw=2)
+        self.thresh_line, = self.ax.plot([], [], lw=2, color='red')
 
     def loop_thread(self):
         INIT = 0
@@ -151,7 +158,7 @@ class OEP():  # Inherit from VideoLoopFinder
     
 
     def calculate_rms(self, frame):
-    # Calculate RMS (Root Mean Square) to measure volume
+    
         rms = np.sqrt(np.mean(np.square(frame)))
         return rms
 
@@ -226,13 +233,14 @@ class OEP():  # Inherit from VideoLoopFinder
 
 
     def extract_frames(self, video_path=0):
+
         video = cv2.VideoCapture(video_path)
         # video.set(3, 800)  # Width
         # video.set(4, 800)  # Height
         
 
-        # loop_thread = threading.Thread(target=self.loop_thread)
-        # loop_thread.start()
+        loop_thread = threading.Thread(target=self.loop_thread)
+        loop_thread.start()
 
         audio_thread = threading.Thread(target=self.audio_thread)
         audio_thread.start()
@@ -240,8 +248,13 @@ class OEP():  # Inherit from VideoLoopFinder
         tracking_thread = threading.Thread(target=self.tracking_thread)
         tracking_thread.start()
 
+        
+
         # time_thread = threading.Thread(target=self.time_thread)
         # time_thread.start()
+
+        # plot_thread = threading.Thread(target=self.plot_thread)
+        # plot_thread.start()
 
         while (self.input):
             try:
@@ -281,7 +294,7 @@ class OEP():  # Inherit from VideoLoopFinder
                     else:
                         cv2.putText(frame, "regular check", (700, 10), cv2.FONT_HERSHEY_PLAIN, 1, (0, 0, 225), 1)
 
-                if(self.check_for_loop):
+                if(self.check_audio):
                     cv2.putText(frame, f"{self.audio_alert} ({self.volume_threshold})", (10, 30), cv2.FONT_HERSHEY_PLAIN, 1, (0, 0, 225), 1)
 
 
@@ -388,42 +401,52 @@ class OEP():  # Inherit from VideoLoopFinder
         cv2.destroyAllWindows()
     
     def audio_thread(self):
-        
         temp_count = 0
-        temp = 0
         flag = 1
         avg = 0
         self.audio_input.start()
-        while(self.check_audio and self.audio_frame is not None):
+        # self.plot_audio_volume()
+        
+        try:
+            while self.check_audio:
+                try:
+                    # Read the audio input frame
+                    self.audio_frame = self.audio_input.read()
+                except Exception as e:
+                    print("Error reading audio frame:", e)
+                    continue  # Skip iteration if reading fails
 
-            # if(temp_count > self.AUDIO_FRAME):
-            #     self.volume_threshold = avg / self.AUDIO_FRAME
-            try:
-               
-                with self.lock:
-                    volume = self.calculate_rms(self.audio_frame)
-                    self.current_audio = volume
-                    avg += volume
-                    # print(round(volume, 2), temp_count, self.AUDIO_FRAME)
-                
-                    if volume > self.volume_threshold:
-                        self.audio_alert = "Noise in close proximity detected"
-                      
-                        if(flag == 1):
-                            temp_count += 1
-                        else:
-                            temp_count = 0
-                            flag = 1
-                    else:
-                        self.audio_alert = "No noise detected"
-                        if(flag == 0):
-                            temp_count += 1
-                        else:
-                            temp_count = 0
-                            flag = 0
-            except Exception as e:
-                print("Error handled in audio thread-> ", e)
-        pass
+                if self.audio_frame is not None:
+                    try:
+                        # Calculate the volume
+                        volume = self.calculate_rms(self.audio_frame)
+                        avg += volume
+                        self.current_audio = volume
+
+
+                        with self.lock:
+                            print("audio ->", volume, self.audio_alert)
+                            self.audio_xs.append(self.time)
+                            self.audio_ys.append(volume)
+                            self.threshold.append(self.volume_threshold)
+                            self.time += 1
+                            # Check the volume threshold
+                            if volume > self.volume_threshold:
+                                self.audio_alert = "Noise in close proximity detected"
+                                temp_count = temp_count + 1 if flag == 1 else 0
+                                flag = 1
+                            else:
+                                self.audio_alert = "No noise detected"
+                                temp_count = temp_count + 1 if flag == 0 else 0
+                                flag = 0
+                    except Exception as e:
+                        print("Error calculating volume in audio thread:", e)
+        finally:
+            # Ensure the audio recorder stops and releases resources
+            self.audio_input.stop()
+            self.audio_input.delete()
+            print("Audio thread stopped, resources released.")
+
     def tracking_thread(self):
         #self.frame
         while(self.tracking):
@@ -433,36 +456,42 @@ class OEP():  # Inherit from VideoLoopFinder
                     with self.lock:
                         self.prev_lip = self.current_lip
                         self.mesh_points,self.landmarks,self.face_looks,self.eye_looks,self.movement_detected, self.strike_count, self.nose_2D_point, self.angle_x, self.angle_y, self.current_lip = temp
-                        print(self.movement_count, self.movement_detected, self.current_lip - self.prev_lip)
+                        # print(self.movement_count, self.movement_detected, self.current_lip - self.prev_lip)
                         if(self.current_lip - self.prev_lip > movement_threshold):
                             
                             self.movement_count += 1
             pass
     
-    # def time_thread(self):
-
-    #     while(True):
-    #         with self.lock:
-    #             self.time += 1
-    #             time.sleep(1)
     
-    # def plot(self):
-    #     pass
-        
+    def plot_audio_volume(self):
+        # Set up the live plot animation function
+        ani = FuncAnimation(self.fig, self.update_plot, blit=True, interval=100)
+        plt.show()
 
-    # def animate(self, i):
-    #     # Update the plot with current audio data
-    #     with self.lock:
-    #         self.audio_xs.append(self.time)
-    #         self.audio_ys.append(self.current_audio)
+    def update_plot(self, frame):
+        with self.lock:
+            # Limit x data to last 30 seconds
+            max_time = 180
+            if len(self.audio_xs) > 0 and self.audio_xs[-1] > max_time:
+                # Keep only the last 30 seconds of data
+                self.audio_xs = [x - self.time + max_time for x in self.audio_xs if x >= self.time - max_time]
+                self.audio_ys = self.audio_ys[-len(self.audio_xs):]
+                self.threshold = self.threshold[-len(self.audio_xs):]
 
-    #         # Limit the plot to the last `MAX_POINTS` data points
-    #         self.audio_xs = self.audio_xs[-self.MAX_POINTS:]
-    #         self.audio_ys = self.audio_ys[-self.MAX_POINTS:]
+            self.line.set_data(self.audio_xs, self.audio_ys)
+            self.thresh_line.set_data(self.audio_xs, self.threshold)
+            self.ax.set_xlim(max(self.time - max_time, 0), self.time)  # Dynamic x-axis limit
+            self.ax.relim()             # Recalculate limits
+            self.ax.autoscale_view()    # Autoscale y-axis
+        return self.line, self.thresh_line
+    
+    def time_thread(self):
 
-    #     # Clear and redraw the plot
-    #     self.ax1.clear()
-    #     self.ax1.plot(self.audio_xs, self.audio_ys)
+        while(True):
+            with self.lock:
+                self.time += 1
+                time.sleep(1)
+    
 
         
 
@@ -470,9 +499,8 @@ class OEP():  # Inherit from VideoLoopFinder
 
 
 object = OEP()
-threading.Thread(target=object.extract_frames, daemon=True).start()
+
 
 filename = r'./loop_detect/videos/orig_vid_3.avi'
 
 object.extract_frames()
-
